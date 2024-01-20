@@ -1,9 +1,20 @@
 # README
 
-App for querying all K8s services in the current context which have an ingress rule but do not have certain security contexts enabled:
+App for querying all K8s services in the current context which have an ingress route - either via an ingress rule or load balancer service - 
+but do not have certain security contexts enabled:
 
-1. RunAsNonRoot
-2. AllowPrivilegeEscalation
-3. ReadOnlyRootFilesystem
+1. RunAsNonRoot in the pod security context
+2. AllowPrivilegeEscalation in the container security context
+3. ReadOnlyRootFilesystem in the container security context
 
-Used as part of a hardening exercise of internet facing services.
+Used as part of a security hardening exercise of internet facing services.
+
+## Run
+
+```shell
+# Point the kubeconfig to the relevant context
+kubectl config use-context <context>
+
+# Run app
+go run main.go
+```

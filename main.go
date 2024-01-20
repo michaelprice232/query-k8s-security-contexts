@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -14,20 +14,92 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
-type ingressResult struct {
-	name           string
-	namespace      string
-	hostname       string
-	backendService string
+type result struct {
+	name             string
+	namespace        string
+	backendService   string
+	serviceSelectors map[string]string
 }
 
-func doesIngressExist(serviceName, namespace string, results map[string][]ingressResult) bool {
+// alreadyInResultsSlice checks if the namespaced service has already been stored in the results map.
+// This helps to dedup the services, so we are only checking each once.
+func alreadyInResultsSlice(serviceName, namespace string, results map[string][]result) bool {
 	for _, i := range results[namespace] {
 		if i.backendService == serviceName {
 			return true
 		}
 	}
 	return false
+}
+
+// processService queries for the k8s service and returns a result struct for further processing.
+// The 2nd return value is whether this resource should be skipped.
+func processService(clientset *kubernetes.Clientset, namespace, ingressName, backendServiceName string) (result, bool, error) {
+	var r result
+	service, err := clientset.CoreV1().Services(namespace).Get(context.TODO(), backendServiceName, metav1.GetOptions{})
+
+	if k8sErrors.IsNotFound(err) {
+		return r, true, nil
+	}
+	// Does not contain any pods
+	if service.Spec.Type == "ExternalName" {
+		return r, true, nil
+	}
+	// Handled separately from the ingress rules
+	if service.Spec.Type == "LoadBalancer" {
+		return r, true, nil
+	}
+	if err != nil {
+		return r, false, fmt.Errorf("error whilst listing service: %w", err)
+	}
+
+	r = result{
+		name:             ingressName,
+		namespace:        namespace,
+		backendService:   backendServiceName,
+		serviceSelectors: service.Spec.Selector,
+	}
+
+	return r, false, nil
+}
+
+// checkSecurityContexts checks whether the services listed in the results map have certain k8s security contexts enabled.
+// Currently just outputs to the console.
+func checkSecurityContexts(clientset *kubernetes.Clientset, results map[string][]result) error {
+	for namespace, slice := range results {
+		for _, i := range slice {
+			labelSelector := metav1.LabelSelector{MatchLabels: i.serviceSelectors}
+			listOptions := metav1.ListOptions{
+				LabelSelector: labels.Set(labelSelector.MatchLabels).String(),
+			}
+			pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			if err != nil {
+				return fmt.Errorf("error whilst listing pods: %w", err)
+			}
+
+			if len(pods.Items) <= 0 {
+				fmt.Printf("No active pods found for ingress %s (service %s, namespace: %s), skipping\n", i.name, i.backendService, i.namespace)
+				continue
+			}
+
+			// Check just the first pod
+			pod := pods.Items[0]
+			if pod.Spec.SecurityContext.RunAsNonRoot == nil || *pod.Spec.SecurityContext.RunAsNonRoot != true {
+				fmt.Printf("%s: RunAsNonRoot is not set to true (pod: %s)\n", i.backendService, pod.Name)
+			}
+			for _, container := range pod.Spec.Containers {
+				if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation != false {
+					fmt.Printf("%s: AllowPrivilegeEscalation is not set to false for service (pod: %s, container: %s)\n", i.backendService, pod.Name, container.Name)
+				}
+				if container.SecurityContext.ReadOnlyRootFilesystem == nil || *container.SecurityContext.ReadOnlyRootFilesystem != true {
+					fmt.Printf("%s: ReadOnlyRootFilesystem is not enabled for service (pod: %s, container: %s)\n", i.backendService, pod.Name, container.Name)
+				}
+			}
+			fmt.Println()
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -57,32 +129,38 @@ func main() {
 	}
 	fmt.Printf("Found %d ingress resources\n", len(ingresses.Items))
 
-	results := make(map[string][]ingressResult)
+	results := make(map[string][]result)
 
+	// Check for services which have at least 1 ingress route
 	for _, i := range ingresses.Items {
+
+		// Using a default backend
 		if i.Spec.DefaultBackend != nil {
 			fmt.Printf("Default backend defined: %#v\n", i.Spec.DefaultBackend)
 
-			if !doesIngressExist(i.Spec.DefaultBackend.Service.Name, i.Namespace, results) {
-				r := ingressResult{
-					name:           i.Name,
-					namespace:      i.Namespace,
-					hostname:       "",
-					backendService: i.Spec.DefaultBackend.Service.Name,
+			if !alreadyInResultsSlice(i.Spec.DefaultBackend.Service.Name, i.Namespace, results) {
+				r, skip, err := processService(clientset, i.Namespace, i.Name, i.Spec.DefaultBackend.Service.Name)
+				if skip {
+					continue
+				}
+				if err != nil {
+					panic(err.Error())
 				}
 				results[i.Namespace] = append(results[i.Namespace], r)
 			}
 		}
 
+		// Using HTTP host paths
 		for _, h := range i.Spec.Rules {
 			for _, p := range h.HTTP.Paths {
-				if !doesIngressExist(p.Backend.Service.Name, i.Namespace, results) {
 
-					r := ingressResult{
-						name:           i.Name,
-						namespace:      i.Namespace,
-						hostname:       h.Host,
-						backendService: p.Backend.Service.Name,
+				if !alreadyInResultsSlice(p.Backend.Service.Name, i.Namespace, results) {
+					r, skip, err := processService(clientset, i.Namespace, i.Name, p.Backend.Service.Name)
+					if skip {
+						continue
+					}
+					if err != nil {
+						panic(err.Error())
 					}
 					results[i.Namespace] = append(results[i.Namespace], r)
 				}
@@ -90,55 +168,32 @@ func main() {
 		}
 	}
 
+	// Check for services which have a LoadBalancer ingress
+	loadBalancerServices, err := clientset.CoreV1().Services("").List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		panic(err.Error())
+	}
+	for _, svc := range loadBalancerServices.Items {
+		if svc.Spec.Type == "LoadBalancer" {
+			r := result{
+				name:             svc.Name,
+				namespace:        svc.Namespace,
+				backendService:   svc.Name,
+				serviceSelectors: svc.Spec.Selector,
+			}
+			results[svc.Namespace] = append(results[svc.Namespace], r)
+		}
+	}
+
 	totalResults := 0
 	for _, v := range results {
 		totalResults += len(v)
 	}
-	fmt.Printf("%d results (after filtering)\n", totalResults)
+	fmt.Printf("%d results (after filtering)\n\n", totalResults)
 
-	for n, s := range results {
-		for _, i := range s {
-			service, err := clientset.CoreV1().Services(n).Get(context.TODO(), i.backendService, metav1.GetOptions{})
-			if errors.IsNotFound(err) {
-				fmt.Printf("Not found service: %s\n", i.backendService)
-				continue
-			} else if err != nil {
-				panic(err)
-			}
-
-			if service.Spec.Type != "ExternalName" {
-				//fmt.Printf("Processing service %s (%s)\n", i.backendService, i.namespace)
-
-				labelSelector := metav1.LabelSelector{MatchLabels: service.Spec.Selector}
-				listOptions := metav1.ListOptions{
-					LabelSelector: labels.Set(labelSelector.MatchLabels).String(),
-				}
-				pods, err := clientset.CoreV1().Pods(i.namespace).List(context.TODO(), listOptions)
-				if err != nil {
-					panic(err.Error())
-				}
-
-				if len(pods.Items) <= 0 {
-					fmt.Printf("No active pods found for ingress %s, skipping\n", i.name)
-					continue
-				}
-				//fmt.Printf("Found %d pods. First pod: %s\n", len(pods.Items), pods.Items[0].Name)
-
-				pod := pods.Items[0]
-				if pod.Spec.SecurityContext.RunAsNonRoot == nil || *pod.Spec.SecurityContext.RunAsNonRoot != true {
-					fmt.Printf("RunAsNonRoot is not set to true for service %s (pod: %s)\n", i.backendService, pod.Name)
-				}
-				for _, container := range pod.Spec.Containers {
-					if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation != false {
-						fmt.Printf("AllowPrivilegeEscalation is set to false for service %s (pod: %s, container: %s)\n", i.backendService, pod.Name, container.Name)
-					}
-					if container.SecurityContext.ReadOnlyRootFilesystem == nil || *container.SecurityContext.ReadOnlyRootFilesystem != true {
-						fmt.Printf("ReadOnlyRootFilesystem is not enabled for service %s (pod: %s, container: %s)\n", i.backendService, pod.Name, container.Name)
-					}
-				}
-
-				fmt.Println()
-			}
-		}
+	// Validate security contexts
+	err = checkSecurityContexts(clientset, results)
+	if err != nil {
+		panic(err.Error())
 	}
 }

@@ -1,6 +1,6 @@
 # README
 
-App for querying all K8s services in the current context which have an ingress route - either via an ingress rule or load balancer service - 
+Script for querying all K8s services in the current context which have an ingress route - either via an ingress rule or load balancer service - 
 but do not have certain security contexts enabled:
 
 1. RunAsNonRoot in the pod security context
@@ -8,6 +8,8 @@ but do not have certain security contexts enabled:
 3. ReadOnlyRootFilesystem in the container security context
 
 Used as part of a security hardening exercise of internet facing services.
+
+Currently, outputs the offending services to the console only.
 
 ## Run
 

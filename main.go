@@ -14,11 +14,12 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
+// result stores information about a single service which provides an ingress (ingress or load balancer) into the k8s environment.
 type result struct {
-	name             string
-	namespace        string
-	backendService   string
-	serviceSelectors map[string]string
+	name             string            // Ingress name for ingress based routes, service name for load balancer based routes
+	namespace        string            // Which namespace does the service belong in
+	backendService   string            // The backend k8s service which we are routing to
+	serviceSelectors map[string]string // The pod selectors used for the backend service
 }
 
 // alreadyInResultsSlice checks if the namespaced service has already been stored in the results map.
@@ -129,6 +130,7 @@ func main() {
 	}
 	fmt.Printf("Found %d ingress resources\n", len(ingresses.Items))
 
+	// stores the deduplicated services as a slice, keyed by namespace
 	results := make(map[string][]result)
 
 	// Check for services which have at least 1 ingress route

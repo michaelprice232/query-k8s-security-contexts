@@ -89,10 +89,10 @@ func checkSecurityContexts(clientset *kubernetes.Clientset, results map[string][
 				fmt.Printf("%s: RunAsNonRoot is not set to true (pod: %s)\n", i.backendService, pod.Name)
 			}
 			for _, container := range pod.Spec.Containers {
-				if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation != false {
+				if container.SecurityContext == nil || container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation != false {
 					fmt.Printf("%s: AllowPrivilegeEscalation is not set to false for service (pod: %s, container: %s)\n", i.backendService, pod.Name, container.Name)
 				}
-				if container.SecurityContext.ReadOnlyRootFilesystem == nil || *container.SecurityContext.ReadOnlyRootFilesystem != true {
+				if container.SecurityContext == nil || container.SecurityContext.ReadOnlyRootFilesystem == nil || *container.SecurityContext.ReadOnlyRootFilesystem != true {
 					fmt.Printf("%s: ReadOnlyRootFilesystem is not enabled for service (pod: %s, container: %s)\n", i.backendService, pod.Name, container.Name)
 				}
 			}

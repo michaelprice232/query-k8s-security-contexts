@@ -85,7 +85,7 @@ func checkSecurityContexts(clientset *kubernetes.Clientset, results map[string][
 
 			// Check just the first pod
 			pod := pods.Items[0]
-			if pod.Spec.SecurityContext.RunAsNonRoot == nil || *pod.Spec.SecurityContext.RunAsNonRoot != true {
+			if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.RunAsNonRoot == nil || *pod.Spec.SecurityContext.RunAsNonRoot != true {
 				fmt.Printf("%s: RunAsNonRoot is not set to true (pod: %s)\n", i.backendService, pod.Name)
 			}
 			for _, container := range pod.Spec.Containers {
